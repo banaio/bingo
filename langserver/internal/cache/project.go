@@ -14,13 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saibing/bingo/langserver/internal/source"
-	"github.com/saibing/bingo/langserver/internal/span"
-	"github.com/saibing/bingo/langserver/internal/util"
-
 	"github.com/sourcegraph/go-lsp"
 	"github.com/sourcegraph/jsonrpc2"
 	"golang.org/x/tools/go/packages"
+
+	"github.com/saibing/bingo/langserver/internal/fastwalk"
+	"github.com/saibing/bingo/langserver/internal/source"
+	"github.com/saibing/bingo/langserver/internal/span"
+	"github.com/saibing/bingo/langserver/internal/util"
 )
 
 const (
@@ -273,16 +274,42 @@ func (p *Project) createBuiltin() error {
 }
 
 func (p *Project) findGoModFiles() []string {
-	var gomodList []string
-	walkFunc := func(path string, name string) {
-		if name == gomod {
-			fullpath := filepath.Join(path, name)
-			gomodList = append(gomodList, fullpath)
-			p.notifyLog(fullpath)
-		}
-	}
+	gomodList := []string{}
+	// var gomodList []string
+	// walkFunc := func(path string, name string) {
+	// 	if name == gomod {
+	// 		fullpath := filepath.Join(path, name)
+	// 		gomodList = append(gomodList, fullpath)
+	// 		p.notifyLog(fullpath)
+	// 	}
+	// }
 
-	err := p.walkDir(p.rootDir, 0, walkFunc)
+	// start := time.Now()
+	err := fastwalk.Walk(p.rootDir, func(path string, typ os.FileMode) error {
+		if typ != os.ModeDir {
+			// found `go.mod` so continue to look in subdirectories but ignore the rest of files in current directory.
+			if filepath.Base(path) == gomod {
+				// log.Printf("    fastwalk, path=%+v\n", path)
+				// log.Printf("    fastwalk, Base=%+v\n", filepath.Base(path))
+				// log.Printf("    fastwalk, typ=%+v\n", typ)
+
+				// fullpath := filepath.Join(path, name)
+				fullpath := path
+				gomodList = append(gomodList, fullpath)
+				p.notifyLog(fullpath)
+				return fastwalk.SkipFiles
+			}
+
+			return nil
+		}
+
+		return nil
+	})
+	// log.Printf("  fastwalk, duration=%+v\n", time.Now().Sub(start))
+
+	// start = time.Now()
+	// err := p.walkDir(p.rootDir, 0, walkFunc)
+	// log.Printf("  walkDir, duration=%+v\n", time.Now().Sub(start))
 	p.notify(err)
 	return gomodList
 }
