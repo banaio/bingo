@@ -11,8 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/saibing/bingo/langserver/internal/source"
 	"github.com/sourcegraph/go-lsp"
+
+	"github.com/saibing/bingo/langserver/internal/source"
 
 	"golang.org/x/tools/go/packages"
 )
@@ -25,11 +26,13 @@ func diagnostics(ctx context.Context, f source.File) (map[string][]lsp.Diagnosti
 		return nil, fmt.Errorf("package is null for file")
 	}
 
-	reports := make(map[string][]lsp.Diagnostic)
+	reports := map[string][]lsp.Diagnostic{}
 	for _, filename := range pkg.GetFilenames() {
 		reports[filename] = []lsp.Diagnostic{}
 	}
-	var parseErrors, typeErrors []packages.Error
+
+	parseErrors := []packages.Error{}
+	typeErrors := []packages.Error{}
 	for _, err := range pkg.GetErrors() {
 		switch err.Kind {
 		case packages.ParseError:
@@ -46,6 +49,7 @@ func diagnostics(ctx context.Context, f source.File) (map[string][]lsp.Diagnosti
 	if len(parseErrors) > 0 {
 		errors = parseErrors
 	}
+
 	for _, err := range errors {
 		pos := parseErrorPos(err)
 		line := pos.Line - 1

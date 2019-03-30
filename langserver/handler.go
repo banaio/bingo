@@ -11,20 +11,30 @@ import (
 
 	"golang.org/x/tools/imports"
 
-	"github.com/saibing/bingo/langserver/internal/cache"
 	lsp "github.com/sourcegraph/go-lsp"
 	"github.com/sourcegraph/go-lsp/lspext"
 	"github.com/sourcegraph/jsonrpc2"
 
+	"github.com/saibing/bingo/langserver/internal/cache"
 	"github.com/saibing/bingo/langserver/internal/util"
+)
+
+var (
+	errLanguageServerMustBeInitialized  = errors.New("languageserver must be initialized")
+	errLanguageServerAlreadyInitialized = errors.New("language server is already initialized")
+	errCodeInvalidParams                = &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
 )
 
 // NewHandler creates a Go language server handler.
 func NewHandler(defaultCfg Config) jsonrpc2.Handler {
-	return lspHandler{jsonrpc2.HandlerWithError((&LangHandler{
+	handleFunc := (&LangHandler{
 		DefaultConfig: defaultCfg,
 		HandlerShared: &HandlerShared{},
-	}).handle)}
+	}).handle
+	handler := jsonrpc2.HandlerWithError(handleFunc)
+	return lspHandler{
+		Handler: handler,
+	}
 }
 
 // lspHandler wraps LangHandler to correctly handle requests in the correct
@@ -44,60 +54,29 @@ type lspHandler struct {
 
 // Handle implements jsonrpc2.Handler
 func (h lspHandler) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) {
-	if isFileSystemRequest(req.Method) {
-		h.Handler.Handle(ctx, conn, req)
-		return
-	}
-	go h.Handler.Handle(ctx, conn, req)
+	// if isFileSystemRequest(req.Method) {
+	// 	h.Handler.Handle(ctx, conn, req)
+	// 	return
+	// }
+	// go h.Handler.Handle(ctx, conn, req)
+	h.Handler.Handle(ctx, conn, req)
 }
 
 // LangHandler is a Go language server LSP/JSON-RPC handler.
 type LangHandler struct {
-	mu sync.Mutex
 	HandlerCommon
 	*HandlerShared
-	init *InitializeParams // set by "initialize" request
-
+	mu      sync.Mutex
+	init    *InitializeParams // set by "initialize" request
 	project *cache.Project
-
-	cancel *cancel
-
+	cancel  *cancel
 	// DefaultConfig is the default values used for configuration. It is
 	// combined with InitializationOptions after initialize. This should be
 	// set by LangHandler creators. Please read config instead.
 	DefaultConfig Config
-
 	// config is the language handler configuration. It is a combination of
 	// DefaultConfig and InitializationOptions.
 	config *Config // pointer so we panic if someone reads before we set it.
-}
-
-// doInit clears all internal state in h.
-func (h *LangHandler) doInit(ctx context.Context, conn *jsonrpc2.Conn, init *InitializeParams) error {
-	if util.IsURI(lsp.DocumentURI(init.InitializeParams.RootPath)) {
-		log.Printf("Passing an initialize rootPath URI (%q) is deprecated. Use rootUri instead.", init.InitializeParams.RootPath)
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	config := h.DefaultConfig.Apply(init.InitializationOptions)
-	h.config = &config
-	imports.LocalPrefix = h.config.GoimportsLocalPrefix
-	h.init = init
-	h.cancel = NewCancel()
-
-	rootPath := h.FilePath(init.Root())
-	buildFlags := []string{}
-	if len(h.config.BuildTags) > 0 {
-		buildFlags = append(buildFlags, "-tags", strings.Join(h.config.BuildTags, " "))
-	}
-	h.project = cache.NewProject(ctx, conn, rootPath, buildFlags)
-	h.overlay = newOverlay(conn, h.project, DiagnosticsStyleEnum(h.DefaultConfig.DiagnosticsStyle))
-	if err := h.project.Init(ctx, cache.CacheStyle(h.DefaultConfig.GlobalCacheStyle)); err != nil {
-		return err
-	}
-	return nil
 }
 
 // handle implements jsonrpc2.Handler.
@@ -117,12 +96,11 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 		}
 	}()
 
-	var cancelManager *cancel
 	h.mu.Lock()
-	cancelManager = h.cancel
+	cancelManager := h.cancel
 	if req.Method != "initialize" && h.init == nil {
 		h.mu.Unlock()
-		return nil, errors.New("server must be initialized")
+		return nil, errLanguageServerMustBeInitialized
 	}
 	h.mu.Unlock()
 	if err := h.CheckReady(); err != nil {
@@ -142,12 +120,12 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 	switch req.Method {
 	case "initialize":
 		if h.init != nil {
-			return nil, errors.New("language server is already initialized")
+			return nil, errLanguageServerAlreadyInitialized
 		}
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params InitializeParams
+		params := InitializeParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -164,7 +142,6 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 		kind := lsp.TDSKIncremental
 		completionOp := &lsp.CompletionOptions{TriggerCharacters: []string{"."}}
-
 		return lsp.InitializeResult{
 			Capabilities: lsp.ServerCapabilities{
 				TextDocumentSync: &lsp.TextDocumentSyncOptionsOrKind{
@@ -209,7 +186,7 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 		if req.Params == nil {
 			return nil, nil
 		}
-		var params lsp.CancelParams
+		params := lsp.CancelParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, nil
 		}
@@ -225,9 +202,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/hover":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.TextDocumentPositionParams
+		params := lsp.TextDocumentPositionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -235,9 +212,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/definition":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.TextDocumentPositionParams
+		params := lsp.TextDocumentPositionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -245,9 +222,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/typeDefinition":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.TextDocumentPositionParams
+		params := lsp.TextDocumentPositionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -255,9 +232,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/xdefinition":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.TextDocumentPositionParams
+		params := lsp.TextDocumentPositionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -265,9 +242,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/completion":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.CompletionParams
+		params := lsp.CompletionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -275,9 +252,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/references":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.ReferenceParams
+		params := lsp.ReferenceParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -285,9 +262,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/implementation":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.TextDocumentPositionParams
+		params := lsp.TextDocumentPositionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -295,9 +272,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/documentSymbol":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.DocumentSymbolParams
+		params := lsp.DocumentSymbolParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -305,9 +282,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/signatureHelp":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.TextDocumentPositionParams
+		params := lsp.TextDocumentPositionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -315,9 +292,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/formatting":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.DocumentFormattingParams
+		params := lsp.DocumentFormattingParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -325,9 +302,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/rangeFormatting":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.DocumentRangeFormattingParams
+		params := lsp.DocumentRangeFormattingParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -335,9 +312,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "workspace/symbol":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lspext.WorkspaceSymbolParams
+		params := lspext.WorkspaceSymbolParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -345,9 +322,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "workspace/xreferences":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lspext.WorkspaceReferencesParams
+		params := lspext.WorkspaceReferencesParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -355,9 +332,9 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/rename":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.RenameParams
+		params := lsp.RenameParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -365,21 +342,48 @@ func (h *LangHandler) Handle(ctx context.Context, conn jsonrpc2.JSONRPC2, req *j
 
 	case "textDocument/codeAction":
 		if req.Params == nil {
-			return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+			return nil, errCodeInvalidParams
 		}
-		var params lsp.CodeActionParams
+		params := lsp.CodeActionParams{}
 		if err := json.Unmarshal(*req.Params, &params); err != nil {
 			return nil, err
 		}
 
 		return h.handleCodeAction(ctx, conn, req, params)
 
-	default:
-		if isFileSystemRequest(req.Method) {
-			err := h.handleFileSystemRequest(ctx, req)
-			return nil, err
-		}
+	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didClose", "textDocument/didSave":
+		err := h.handleFileSystemRequest(ctx, req)
+		return nil, err
 
+	default:
 		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeMethodNotFound, Message: fmt.Sprintf("method not supported: %s", req.Method)}
 	}
+}
+
+// doInit clears all internal state in h.
+func (h *LangHandler) doInit(ctx context.Context, conn *jsonrpc2.Conn, init *InitializeParams) error {
+	if util.IsURI(lsp.DocumentURI(init.InitializeParams.RootPath)) {
+		log.Printf("initialize: rootPath URI (%q) is deprecated in favour rootUri", init.InitializeParams.RootPath)
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	config := h.DefaultConfig.Apply(init.InitializationOptions)
+	h.config = &config
+	imports.LocalPrefix = h.config.GoimportsLocalPrefix
+	h.init = init
+	h.cancel = NewCancel()
+
+	rootPath := h.FilePath(init.Root())
+	buildFlags := []string{}
+	if len(h.config.BuildTags) > 0 {
+		buildFlags = append(buildFlags, "-tags", strings.Join(h.config.BuildTags, " "))
+	}
+	h.project = cache.NewProject(ctx, conn, rootPath, buildFlags)
+	h.overlay = newOverlay(conn, h.project, DiagnosticsStyleEnum(h.DefaultConfig.DiagnosticsStyle))
+	if err := h.project.Init(ctx, cache.CacheStyle(h.DefaultConfig.GlobalCacheStyle)); err != nil {
+		return err
+	}
+	return nil
 }

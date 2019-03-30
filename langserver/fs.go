@@ -7,21 +7,27 @@ import (
 	"log"
 	"unicode/utf8"
 
+	lsp "github.com/sourcegraph/go-lsp"
+	"github.com/sourcegraph/jsonrpc2"
+
 	"github.com/saibing/bingo/langserver/internal/cache"
 	"github.com/saibing/bingo/langserver/internal/source"
 	"github.com/saibing/bingo/langserver/internal/span"
-	lsp "github.com/sourcegraph/go-lsp"
-	"github.com/sourcegraph/jsonrpc2"
 )
 
-// isFileSystemRequest returns if this is an LSP method whose sole
-// purpose is modifying the contents of the overlay file system.
-func isFileSystemRequest(method string) bool {
-	return method == "textDocument/didOpen" ||
-		method == "textDocument/didChange" ||
-		method == "textDocument/didClose" ||
-		method == "textDocument/didSave"
-}
+var (
+	errUnexpectedChangeRangeProvided = newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "unexpected change range provided")
+	errFileNotFound                  = newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "file not found")
+	errInvalidRangeForContentChange  = newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "invalid range for content change")
+)
+
+type DiagnosticsStyleEnum string
+
+const (
+	noneDiagnostics    DiagnosticsStyleEnum = "none"
+	onsaveDiagnostics  DiagnosticsStyleEnum = "onsave"
+	instantDiagnostics DiagnosticsStyleEnum = "instant"
+)
 
 // handleFileSystemRequest handles textDocument/did* requests. The URI the
 // request is for is returned. true is returned if a file was modified.
@@ -85,8 +91,7 @@ func (h *HandlerShared) handleFileSystemRequest(ctx context.Context, req *jsonrp
 	}
 }
 
-// overlay owns the overlay filesystem, as well as handling LSP filesystem
-// requests.
+// overlay owns the overlay filesystem, as well as handling LSP filesystem requests.
 type overlay struct {
 	conn             *jsonrpc2.Conn
 	project          *cache.Project
@@ -94,7 +99,11 @@ type overlay struct {
 }
 
 func newOverlay(conn *jsonrpc2.Conn, project *cache.Project, diagnosticsStyle DiagnosticsStyleEnum) *overlay {
-	return &overlay{conn: conn, project: project, diagnosticsStyle: diagnosticsStyle}
+	return &overlay{
+		conn:             conn,
+		project:          project,
+		diagnosticsStyle: diagnosticsStyle,
+	}
 }
 
 func (h *overlay) view() source.View {
@@ -125,7 +134,8 @@ func (h *overlay) didClose(ctx context.Context, params *lsp.DidCloseTextDocument
 }
 
 func (h *overlay) didSave(ctx context.Context, param *lsp.DidSaveTextDocumentParams) {
-	if h.diagnosticsStyle != onsaveDiagnostics {
+	shouldDiagnose := h.diagnosticsStyle == instantDiagnostics || h.diagnosticsStyle == onsaveDiagnostics
+	if !shouldDiagnose {
 		return
 	}
 
@@ -155,14 +165,6 @@ func (h *overlay) cacheAndDiagnose(ctx context.Context, uri lsp.DocumentURI, tex
 func (h *overlay) setContent(ctx context.Context, uri span.URI, content []byte) error {
 	return h.view().SetContent(ctx, uri, content)
 }
-
-type DiagnosticsStyleEnum string
-
-const (
-	noneDiagnostics    DiagnosticsStyleEnum = "none"
-	onsaveDiagnostics  DiagnosticsStyleEnum = "onsave"
-	instantDiagnostics DiagnosticsStyleEnum = "instant"
-)
 
 func (h *overlay) diagnosetics(ctx context.Context, f source.File) {
 	reports, err := diagnostics(ctx, f)
@@ -211,16 +213,12 @@ func bytesOffset(content []byte, pos lsp.Position) int {
 	return -1
 }
 
-func newJsonrpc2Errorf(code int64, message string) error {
-	return &jsonrpc2.Error{Code: code, Message: message}
-}
-
 func (h *overlay) applyChanges(ctx context.Context, params *lsp.DidChangeTextDocumentParams) ([]byte, error) {
 	if len(params.ContentChanges) == 1 && params.ContentChanges[0].Range == nil {
 		// If range is empty, we expect the full content of file, i.e. a single change with no range.
 		change := params.ContentChanges[0]
 		if change.RangeLength != 0 {
-			return nil, newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "unexpected change range provided")
+			return nil, errUnexpectedChangeRangeProvided
 		}
 		return []byte(change.Text), nil
 	}
@@ -232,18 +230,18 @@ func (h *overlay) applyChanges(ctx context.Context, params *lsp.DidChangeTextDoc
 
 	file, err := h.project.View().GetFile(ctx, sourceURI)
 	if err != nil {
-		return nil, newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "file not found")
+		return nil, errFileNotFound
 	}
 
 	content := file.GetContent(ctx)
 	for _, change := range params.ContentChanges {
 		start := bytesOffset(content, change.Range.Start)
 		if start == -1 {
-			return nil, newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "invalid range for content change")
+			return nil, errInvalidRangeForContentChange
 		}
 		end := bytesOffset(content, change.Range.End)
 		if end == -1 {
-			return nil, newJsonrpc2Errorf(jsonrpc2.CodeInternalError, "invalid range for content change")
+			return nil, errInvalidRangeForContentChange
 		}
 		var buf bytes.Buffer
 		buf.Write(content[:start])
