@@ -74,7 +74,7 @@ func implements(project *cache.Project, pkg source.Package, path []ast.Node, act
 
 	f := func(p source.Package) error {
 		for _, obj := range p.GetTypesInfo().Defs {
-			if obj, ok := obj.(*types.TypeName); ok && !isAlias(obj) {
+			if obj, ok := obj.(*types.TypeName); ok && !obj.IsAlias() {
 				if named, ok := obj.Type().(*types.Named); ok {
 					allNamed = append(allNamed, named)
 				}
