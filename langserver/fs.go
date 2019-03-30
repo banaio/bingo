@@ -159,7 +159,8 @@ func (h *overlay) cacheAndDiagnose(ctx context.Context, uri lsp.DocumentURI, tex
 		return
 	}
 
-	go h.diagnosetics(ctx, f)
+	// go h.diagnosetics(ctx, f)
+	h.diagnosetics(ctx, f)
 }
 
 func (h *overlay) setContent(ctx context.Context, uri span.URI, content []byte) error {

@@ -58,8 +58,8 @@ func (h lspHandler) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrp
 	// 	h.Handler.Handle(ctx, conn, req)
 	// 	return
 	// }
-	// go h.Handler.Handle(ctx, conn, req)
-	h.Handler.Handle(ctx, conn, req)
+	go h.Handler.Handle(ctx, conn, req)
+	// h.Handler.Handle(ctx, conn, req)
 }
 
 // LangHandler is a Go language server LSP/JSON-RPC handler.
