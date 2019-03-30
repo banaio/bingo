@@ -1,4 +1,4 @@
-package main // import "github.com/saibing/bingo"
+package main
 
 import (
 	"context"
@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/saibing/bingo/langserver"
 	"github.com/sourcegraph/jsonrpc2"
+
+	"github.com/saibing/bingo/langserver"
 
 	_ "net/http/pprof"
 )
@@ -92,7 +93,7 @@ func main() {
 
 func run(cfg langserver.Config) error {
 	if *printVersion {
-		fmt.Println(version)
+		fmt.Printf("langserver-go version %+v\n", version)
 		return nil
 	}
 
@@ -109,7 +110,7 @@ func run(cfg langserver.Config) error {
 	}
 	log.SetOutput(logW)
 
-	var connOpt []jsonrpc2.ConnOpt
+	connOpt := []jsonrpc2.ConnOpt{}
 	if *trace {
 		connOpt = append(connOpt, jsonrpc2.LogMessages(log.New(logW, "", 0)))
 	}
@@ -137,30 +138,13 @@ func run(cfg langserver.Config) error {
 
 	case "stdio":
 		log.Println("langserver-go: reading on stdin, writing on stdout")
-		<-jsonrpc2.NewConn(context.Background(), jsonrpc2.NewBufferedStream(stdrwc{}, jsonrpc2.VSCodeObjectCodec{}), newHandler(), connOpt...).DisconnectNotify()
+		<-jsonrpc2.NewConn(context.Background(), jsonrpc2.NewBufferedStream(NewStdIOReadWriteCloser(), jsonrpc2.VSCodeObjectCodec{}), newHandler(), connOpt...).DisconnectNotify()
 		log.Println("connection closed")
 		return nil
 
 	default:
 		return fmt.Errorf("invalid mode %q", *mode)
 	}
-}
-
-type stdrwc struct{}
-
-func (stdrwc) Read(p []byte) (int, error) {
-	return os.Stdin.Read(p)
-}
-
-func (stdrwc) Write(p []byte) (int, error) {
-	return os.Stdout.Write(p)
-}
-
-func (stdrwc) Close() error {
-	if err := os.Stdin.Close(); err != nil {
-		return err
-	}
-	return os.Stdout.Close()
 }
 
 // freeOSMemory should be called in a goroutine, it invokes
