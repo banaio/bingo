@@ -6,6 +6,11 @@ import (
 	"sync"
 )
 
+var (
+	errLanguageServerIsShuttingDown  = errors.New("language server is shutting down")
+	errLanguageServerAlreadyShutdown = errors.New("language server received a shutdown request after it was already shut down")
+)
+
 // HandlerCommon contains functionality that both the build and lang
 // handlers need. They do NOT share the memory of this HandlerCommon
 // struct; it is just common functionality. (Unlike HandlerCommon,
@@ -19,7 +24,7 @@ type HandlerCommon struct {
 func (h *HandlerCommon) ShutDown() {
 	h.mu.Lock()
 	if h.shutdown {
-		log.Printf("Warning: server received a shutdown request after it was already shut down.")
+		log.Println(errLanguageServerAlreadyShutdown)
 	}
 	h.shutdown = true
 	h.mu.Unlock()
@@ -31,7 +36,7 @@ func (h *HandlerCommon) CheckReady() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.shutdown {
-		return errors.New("server is shutting down")
+		return errLanguageServerIsShuttingDown
 	}
 	return nil
 }
